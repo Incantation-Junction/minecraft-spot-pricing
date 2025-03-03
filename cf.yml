@@ -5,7 +5,7 @@ Parameters:
   ECSAMI:
     Description: AWS ECS AMI ID
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
-    Default: /aws/service/ecs/optimized-ami/amazon-linux-2/recommended/image_id
+    Default: /aws/service/ecs/optimized-ami/amazon-linux-2023/recommended/image_id
 
   ServerState:
     Type: String
@@ -115,6 +115,11 @@ Parameters:
     Description: Server minecraft version
     Default: ''
 
+  ContainerMemory:
+    Type: Number
+    Description: How much Memory to allocate for the Server Container.
+    Default: '1024'
+
   Memory:
     Type: String
     Description: How much Memory to allocate for the JVM
@@ -178,6 +183,7 @@ Metadata:
         Parameters:
         - ServerState
         - InstanceType
+        - ContainerMemory
         - SpotPrice
       - Label:
           default: Server Settings
@@ -260,6 +266,8 @@ Metadata:
         default: "If you have a hosted zone in Route 53 and wish to update a DNS record whenever your Minecraft instance starts, supply the hosted zone ID here."
       RecordName:
         default: "If you have a hosted zone in Route 53 and wish to set a DNS record whenever your Minecraft instance starts, supply a record name here (e.g. minecraft.mydomain.com)."
+      ContainerMemory:
+        default: "Set this to 75% of your instance memory capacity. Format: 8096"
       Memory:
         default: "If you wish to increase the Java memory-heap limit of 1GB. Format: <size>[g|G|m|M|k|K]"
       Seed:
@@ -442,26 +450,34 @@ Resources:
         CidrIp: 0.0.0.0/0
       VpcId: !Ref Vpc
 
-  LaunchConfiguration:
-    Type: AWS::AutoScaling::LaunchConfiguration
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    DependsOn: Efs
     Properties:
-      AssociatePublicIpAddress: true
-      IamInstanceProfile: !Ref InstanceProfile
-      ImageId: !Ref ECSAMI
-      InstanceType: !Ref InstanceType
-      KeyName: 
-        !If [ KeyPairNameProvided, !Ref KeyPairName, !Ref 'AWS::NoValue' ]
-      SecurityGroups:
-      - !Ref Ec2Sg
-      SpotPrice: !If [ SpotPriceProvided, !Ref SpotPrice, !Ref 'AWS::NoValue' ]
-      UserData:
-        Fn::Base64: !Sub |
-          #!/bin/bash -xe
-          echo ECS_CLUSTER=${EcsCluster} >> /etc/ecs/ecs.config
-          yum install -y amazon-efs-utils
-          mkdir /opt/minecraft
-          mount -t efs ${Efs}:/ /opt/minecraft
-          chown 845:845 /opt/minecraft
+      LaunchTemplateName: !Sub ${AWS::StackName}-launch-template
+      LaunchTemplateData:
+        KeyName: !Ref KeyPairName
+        NetworkInterfaces:
+          - AssociatePublicIpAddress: true
+            DeleteOnTermination: true
+            DeviceIndex: 0
+            Groups:
+              - !Ref Ec2Sg
+        ImageId: !Ref ECSAMI
+        InstanceType: !Ref InstanceType
+        IamInstanceProfile:
+          Name: !Ref InstanceProfile
+        UserData:
+          Fn::Base64: !Sub
+            - |
+              #!/bin/bash -xe
+              # About ecs.config: https://github.com/aws/amazon-ecs-agent/blob/master/README.md
+              echo ECS_CLUSTER=${AWS::StackName}-cluster >> /etc/ecs/ecs.config
+              yum install -y amazon-efs-utils htop iftop nano
+              mkdir /opt/minecraft
+              mount -t efs -o tls ${efs_id}:/ /opt/minecraft
+              chown 777:777 /opt/minecraft
+            - efs_id: !Ref Efs
 
   AutoScalingGroup:
     Type: AWS::AutoScaling::AutoScalingGroup
@@ -471,7 +487,9 @@ Resources:
     Properties:
       AutoScalingGroupName: !Sub "${AWS::StackName}-asg"
       DesiredCapacity: !FindInMap [ ServerState, !Ref ServerState, DesiredCapacity ]
-      LaunchConfigurationName: !Ref LaunchConfiguration
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
       NewInstancesProtectedFromScaleIn: true
       MaxSize: 1
       MinSize: 0
@@ -495,6 +513,7 @@ Resources:
           - sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
 
   InstanceProfile:
     Type: AWS::IAM::InstanceProfile
@@ -557,8 +576,8 @@ Resources:
       NetworkMode: "bridge"
       ContainerDefinitions:      
         - Name: minecraft
-          MemoryReservation: 1024
-          Image: !Sub "itzg/minecraft-server:${MinecraftImageTag}"
+          MemoryReservation: !Ref ContainerMemory
+          Image: !Sub "docker.io/itzg/minecraft-server:${MinecraftImageTag}"
           EntryPoint: !If
               - EntryPointProvided
               - !Ref EntryPoint
