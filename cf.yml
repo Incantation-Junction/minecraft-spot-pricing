@@ -476,7 +476,7 @@ Resources:
               yum install -y amazon-efs-utils htop iftop nano
               mkdir /opt/minecraft
               mount -t efs -o tls ${efs_id}:/ /opt/minecraft
-              chown 777:777 /opt/minecraft
+              chown 845:845 /opt/minecraft
             - efs_id: !Ref Efs
 
   AutoScalingGroup:
